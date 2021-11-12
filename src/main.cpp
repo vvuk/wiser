@@ -61,14 +61,14 @@ struct COM_PORT {
 
   void begin() {
     beginSerial();
-    server.begin();
     server.setNoDelay(true);
+    server.begin();
   }
 };
 
 COM_PORT COM[] = {
-  { {}, SERIAL0_TCP_PORT, {}, SERIAL0_BAUD,
-    WhateverSerialConfig(SERIAL0_PARAM), D3, D4 }, //SERIAL0_TXPIN, SERIAL0_RXPIN },
+  { {}, SERIAL0_TCP_PORT, {}, 9600, //SERIAL0_BAUD,
+    WhateverSerialConfig(SERIAL0_PARAM), D1, D2 }, //D2, D1 }, //SERIAL0_TXPIN, SERIAL0_RXPIN },
   //{ {}, SERIAL1_TCP_PORT, {}, SERIAL1_BAUD,
   //  WhateverSerialConfig(SERIAL1_PARAM), SERIAL1_TXPIN, SERIAL1_RXPIN },
 };
@@ -114,11 +114,13 @@ void WiFiStationDisconnected(const WiFiEventSoftAPModeStationDisconnected& evt) 
 
 #define NUM_COMS int(sizeof(COM) / sizeof(COM[0]))
 
-void setup() {
+void setup()
+{
+  WiFiClient::setDefaultNoDelay(true);
+  WiFiClient::setDefaultSync(true);
 
   delay(500);
   Serial.begin(38400);
-
   delay(500);
 
   DPRINTF("\n\nWiFi serial bridge %s ", VERSION);
@@ -230,6 +232,8 @@ void loop()
       while (char *nl = strchr(clientCmdBuf, '\n')) {
         *nl = 0;
 
+        DPRINTF("Command: '%s'\n", clientCmdBuf);
+
         // handle command in clientCmdBuf
         if (strstr(clientCmdBuf, "baud ") == clientCmdBuf) {
           int port = atoi(clientCmdBuf + 5) - 1;
@@ -242,9 +246,9 @@ void loop()
           } else {
             COM[port].baud = baud;
             COM[port].beginSerial();
-            controlClient.write("OK\n");
+            controlClient.printf("OK %d %d\n", port + 1, baud);
           }
-        } else if (strcmp(clientCmdBuf, "status") == 0) {
+        } else if (strstr(clientCmdBuf, "status") == clientCmdBuf) {
           for (int i = 0; NUM_COMS > i; i++) {
             controlClient.printf("Port %d: %d baud\n", i + 1, COM[i].baud);
           }
@@ -252,7 +256,6 @@ void loop()
           controlClient.write("Commands:\n");
           controlClient.write("baud <port> <baud>\n");
           controlClient.write("status\n");
-          controlClient.write("Unknown command\n");
         }
 
         // next command
@@ -299,36 +302,23 @@ void loop()
       if (!com.clients[i].connected())
         continue;
 
-      bufpos = 0;
       // read from client and write to serial port
-      while (com.clients[i].available()) {
-        sBuffer[bufpos++] = com.clients[i].read();
-        if (bufpos == BUFFER_SIZE) {
-          com.serial.write(sBuffer, bufpos);
-          bufpos = 0;
-        }
-      }
-      if (bufpos > 0) {
-        com.serial.write(sBuffer, bufpos);
+      while (int nread = com.clients[i].read(sBuffer, BUFFER_SIZE)) {
+        sBuffer[nread] = 0;
+        DPRINTF("tcp->ser r: %d bytes '%s'\n", nread, sBuffer);
+        com.serial.write(sBuffer, nread);
       }
     }
 
     // read from serial port and write to all clients
-    bufpos = 0;
-    while (com.serial.available()) {
-      sBuffer[bufpos++] = com.serial.read();
-      if (bufpos == BUFFER_SIZE) {
-        for (int i = 0; i < MAX_CLIENTS_PER_PORT; i++) {
-          if (com.clients[i].connected()) {
-            com.clients[i].write(sBuffer, bufpos);
-          }
-        }
-      }
-    }
-    if (bufpos > 0) {
+    while (int nread = com.serial.read(sBuffer, BUFFER_SIZE)) {
+      sBuffer[nread] = 0;
+      DPRINTF("ser r: %d bytes '%s'\n", nread, sBuffer);
+
       for (int i = 0; i < MAX_CLIENTS_PER_PORT; i++) {
         if (com.clients[i].connected()) {
-          com.clients[i].write(sBuffer, bufpos);
+          DPRINTF("tcp w[%d]: %d bytes\n", i, bufpos);
+          com.clients[i].write(sBuffer, nread);
         }
       }
     }
