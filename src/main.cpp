@@ -6,13 +6,6 @@
  * Forked from https://github.com/yuri-rage/ESP-Serial-Bridge
  * Forked from https://github.com/AlphaLima/ESP32-Serial-Bridge
  * 
- * Added compatibility for ESP8266, WiFi reconnect on failure, and mDNS discovery.
- * 
- * Note: ESP8266 is limited to 115200 baud and may be somewhat unreliable in
- *       this application.
- * 
- *   -- Yuri - Aug 2021
- * 
  * Disclaimer: Don't use for life support systems or any other situation
  * where system failure may affect user or environmental safety.
 *********************************************************************************/
@@ -24,7 +17,6 @@
 #elif defined(ESP8266)
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
-#include <SoftwareSerial.h>  // use SoftwareSerial for ESP8266
 #endif
 #include <WiFiClient.h>
 
@@ -34,29 +26,31 @@
 #include <ArduinoOTA.h> 
 #endif
 
-#ifdef ESP32
-#define WhateverSerial HardwareSerial
-#define WhateverSerialConfig HardwareSerialConfig
-#else
-#define WhateverSerial SoftwareSerial
-#define WhateverSerialConfig SoftwareSerialConfig
-#endif
-
 #define MAX_CLIENTS_PER_PORT 1
 
 struct COM_PORT {
-  WhateverSerial serial;
+  HardwareSerial serial;
   WiFiServer server;
   WiFiClient clients[MAX_CLIENTS_PER_PORT];
 
   uint32_t baud;
-  WhateverSerialConfig config;
+  SerialConfig config;
 
-  int rxPin;
-  int txPin;
+  int enablePin; // -1 if not used, otherwise pulls pin high on start
+
+  COM_PORT(int uart, int serverPort, uint32_t brate = 9600, int en = -1, SerialConfig scfg = SERIAL_8N1)
+    : serial(uart), server(serverPort)
+    , baud(brate), enablePin(en), config(scfg)
+  {
+    if (en != -1) {
+      pinMode(en, OUTPUT);
+      digitalWrite(en, LOW);
+    }
+  }
 
   void beginSerial() {
-    serial.begin(baud, config, rxPin, txPin);
+    digitalWrite(enablePin, HIGH);
+    serial.begin(baud, config);
   }
 
   void begin() {
@@ -67,11 +61,10 @@ struct COM_PORT {
 };
 
 COM_PORT COM[] = {
-  { {}, SERIAL0_TCP_PORT, {}, 9600, //SERIAL0_BAUD,
-    WhateverSerialConfig(SERIAL0_PARAM), D1, D2 }, //D2, D1 }, //SERIAL0_TXPIN, SERIAL0_RXPIN },
-  //{ {}, SERIAL1_TCP_PORT, {}, SERIAL1_BAUD,
-  //  WhateverSerialConfig(SERIAL1_PARAM), SERIAL1_TXPIN, SERIAL1_RXPIN },
+  { 0, SERIAL0_TCP_PORT, 9600, D8 },
 };
+
+#define NUM_COMS int(sizeof(COM) / sizeof(COM[0]))
 
 WiFiServer controlServer(CONTROL_PORT);
 WiFiClient controlClient;
@@ -80,7 +73,7 @@ int clientCmdBufPos = 0;
 
 char sBuffer[BUFFER_SIZE];
 
-#define DPRINTF(...) if (debug) Serial.printf(__VA_ARGS__)
+#define DPRINTF(...) if (debug && controlClient.connected()) controlClient.printf(__VA_ARGS__)
 
 #ifdef MODE_STA
 void reconnectWiFi()
@@ -112,15 +105,11 @@ void WiFiStationDisconnected(const WiFiEventSoftAPModeStationDisconnected& evt) 
 }
 #endif
 
-#define NUM_COMS int(sizeof(COM) / sizeof(COM[0]))
-
 void setup()
 {
   WiFiClient::setDefaultNoDelay(true);
   WiFiClient::setDefaultSync(true);
 
-  delay(500);
-  Serial.begin(38400);
   delay(500);
 
   DPRINTF("\n\nWiFi serial bridge %s ", VERSION);
@@ -163,21 +152,22 @@ void setup()
         type = "filesystem";
 
       // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-      Serial.println("Start updating " + type);
+      DPRINTF("OTA Start updating %s\n", type);
     });
     ArduinoOTA.onEnd([]() {
-      Serial.println("\nEnd");
+      DPRINTF("OTA End\n"); 
     });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+     DPRINTF("OTA Progress: %u%%\r", (progress / (total / 100))); 
     });
     ArduinoOTA.onError([](ota_error_t error) {
-      Serial.printf("Error[%u]: ", error);
-      if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-      else if (error == OTA_END_ERROR) Serial.println("End Failed");
+      DPRINTF("Error[%u]: ", error);
+      if (error == OTA_AUTH_ERROR) DPRINTF("Auth Failed");
+      else if (error == OTA_BEGIN_ERROR) DPRINTF("Begin Failed");
+      else if (error == OTA_CONNECT_ERROR) DPRINTF("Connect Failed");
+      else if (error == OTA_RECEIVE_ERROR) DPRINTF("Receive Failed");
+      else if (error == OTA_END_ERROR) DPRINTF("End Failed");
+      DPRINTF("\n");
     });
   // if DNSServer is started with "*" for domain name, it will reply with
   // provided IP to all DNS request
@@ -188,10 +178,7 @@ void setup()
   controlServer.begin();
 
   for (int num = 0; num < NUM_COMS; num++) {
-    if (debug) {
-      Serial.print("Starting serial comms & TCP Server ");
-      Serial.println(num + 1);
-    }
+    DPRINTF("Starting serial comms & TCP Server %d\n", num + 1);
     COM[num].begin();
   }
 
