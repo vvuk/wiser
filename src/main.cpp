@@ -71,7 +71,7 @@ struct COM_PORT {
 };
 
 //SoftwareSerial serial1(D4, D3);
-HardwareSerial serial1(1);
+HardwareSerial serial1(0);
 
 COM_PORT COM[] = {
   {
