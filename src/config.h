@@ -14,8 +14,9 @@
 const char *ssid = "MajorNet";          // SSID to broadcast (or join)
 const char *pw = "barkbark11275";        // wifi password
 const char *mdns_name = "esp32";    // hostname for STA mode mDNS
-IPAddress ip(192, 168, 7, 218);       // static IP for AP mode
-IPAddress netmask(255, 255, 252, 0);
+
+IPAddress apIP(192, 168, 200, 1);       // static IP for AP mode
+IPAddress apNetmask(255, 255, 255, 0);
 
 const bool debug = true; // set false to suppress system serial messages
 
@@ -23,12 +24,6 @@ const bool debug = true; // set false to suppress system serial messages
 #define VERSION "1.11-ESP32"
 #elif defined(ESP8266)
 #define VERSION "1.11-ESP8266"
-#endif
-
-#ifdef ESP32
-#define NUM_COM   3    // 3 available on ESP32
-#elif defined(ESP8266)
-#define NUM_COM   2    // we only use 2 on ESP8266
 #endif
 
 #define CONTROL_PORT 8880

@@ -17,6 +17,7 @@
 #elif defined(ESP8266)
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
+#include <SoftwareSerial.h>
 #endif
 #include <WiFiClient.h>
 
@@ -26,10 +27,17 @@
 #include <ArduinoOTA.h> 
 #endif
 
-#define MAX_CLIENTS_PER_PORT 1
+// Control-Q
+#define ESCAPE_CHAR 0x11
+#define MAX_CLIENTS_PER_PORT 2
 
 struct COM_PORT {
-  HardwareSerial serial;
+  typedef void (*ConfigureSerialFn)(uint32_t baud, SerialConfig cfg);
+
+  //HardwareSerial serial;
+  Stream& serial;
+  ConfigureSerialFn serialConfigure;
+
   WiFiServer server;
   WiFiClient clients[MAX_CLIENTS_PER_PORT];
 
@@ -38,9 +46,10 @@ struct COM_PORT {
 
   int enablePin; // -1 if not used, otherwise pulls pin high on start
 
-  COM_PORT(int uart, int serverPort, uint32_t brate = 9600, int en = -1, SerialConfig scfg = SERIAL_8N1)
-    : serial(uart), server(serverPort)
-    , baud(brate), enablePin(en), config(scfg)
+  COM_PORT(Stream& srm, ConfigureSerialFn cfg,
+    int serverPort, uint32_t brate = 9600, int en = -1, SerialConfig scfg = SERIAL_8N1)
+    : serial(srm), serialConfigure(cfg)
+    , server(serverPort), baud(brate), enablePin(en), config(scfg)
   {
     if (en != -1) {
       pinMode(en, OUTPUT);
@@ -49,8 +58,9 @@ struct COM_PORT {
   }
 
   void beginSerial() {
-    digitalWrite(enablePin, HIGH);
-    serial.begin(baud, config);
+    if (enablePin != -1)
+      digitalWrite(enablePin, HIGH);
+    serialConfigure(baud, config);
   }
 
   void begin() {
@@ -60,14 +70,22 @@ struct COM_PORT {
   }
 };
 
+//SoftwareSerial serial1(D4, D3);
+HardwareSerial serial1(1);
+
 COM_PORT COM[] = {
-  { 0, SERIAL0_TCP_PORT, 9600, D8 },
+  {
+    //serial1, [](uint32_t baud, SerialConfig cfg) { serial1.begin(baud, (SoftwareSerialConfig)cfg, -1, -1); },
+    serial1, [](uint32_t baud, SerialConfig cfg) { serial1.begin(baud, cfg); },
+    SERIAL0_TCP_PORT, 9600, D8, SERIAL_8N1
+  },
 };
 
 #define NUM_COMS int(sizeof(COM) / sizeof(COM[0]))
 
 WiFiServer controlServer(CONTROL_PORT);
 WiFiClient controlClient;
+int controlCom = -1; // if the controlClient should be connected to a com port
 char clientCmdBuf[BUFFER_SIZE + 1];
 int clientCmdBufPos = 0;
 
@@ -203,9 +221,11 @@ void loop()
       controlClient.stop();
     }
     controlClient = controlServer.available();
+    // always disconnect from a com port
+    controlCom = -1;
   }
 
-  if (controlClient.connected()) {
+  if (controlClient.connected() && controlCom == -1) {
     while (int av = controlClient.available()) {
       if (av + clientCmdBufPos < BUFFER_SIZE) {
         controlClient.readBytes(clientCmdBuf + clientCmdBufPos, av);
@@ -235,13 +255,23 @@ void loop()
             COM[port].beginSerial();
             controlClient.printf("OK %d %d\n", port + 1, baud);
           }
+        } else if (strstr(clientCmdBuf, "com ") == clientCmdBuf) {
+          int port = atoi(clientCmdBuf + 4) - 1;
+          if (port < 0 || port >= NUM_COMS) {
+            controlClient.write("Invalid port\n");
+          } else {
+            controlClient.printf(">> Connecting to port %d\n", port + 1);
+            controlCom = port;
+            break;
+          }
         } else if (strstr(clientCmdBuf, "status") == clientCmdBuf) {
           for (int i = 0; NUM_COMS > i; i++) {
             controlClient.printf("Port %d: %d baud\n", i + 1, COM[i].baud);
           }
         } else {
           controlClient.write("Commands:\n");
-          controlClient.write("baud <port> <baud>\n");
+          controlClient.write("baud <port> <baud> -- set COM<port> baud rate (8n1 assumed)\n");
+          controlClient.write("com <port> -- connect to COM<port>\n");
           controlClient.write("status\n");
         }
 
@@ -280,21 +310,32 @@ void loop()
   {
     auto& com = COM[num];
 
-    // handle incoming from TCP, and send to UART
-    int bufpos = 0;
+    auto fromTcpToSerial = [&](WiFiClient& client, Stream& serial, bool handleEscape) {
+      // read from client and write to serial port
+      while (int nread = client.read(sBuffer, BUFFER_SIZE)) {
+        sBuffer[nread] = 0;
+        if (handleEscape) {
+          if (char *esc = strchr(sBuffer, ESCAPE_CHAR)) {
+            *esc = 0;
+            nread = esc - sBuffer;
+            controlCom = -1;
+            controlClient.write(">>> Back to control console\n");
+          }
+        }
+        DPRINTF("tcp->ser r: %d bytes '%s'\n", nread, sBuffer);
+        serial.write(sBuffer, nread);
+      }
+    };
 
-    // TODO -- should broadcast to other TCP connections, otherwise
-    // things will look weird?
+    if (controlCom == num) {
+      fromTcpToSerial(controlClient, com.serial, true);
+    }
+
     for (int i = 0; i < MAX_CLIENTS_PER_PORT; i++) {
       if (!com.clients[i].connected())
         continue;
 
-      // read from client and write to serial port
-      while (int nread = com.clients[i].read(sBuffer, BUFFER_SIZE)) {
-        sBuffer[nread] = 0;
-        DPRINTF("tcp->ser r: %d bytes '%s'\n", nread, sBuffer);
-        com.serial.write(sBuffer, nread);
-      }
+      fromTcpToSerial(com.clients[i], com.serial, false);
     }
 
     // read from serial port and write to all clients
@@ -302,9 +343,13 @@ void loop()
       sBuffer[nread] = 0;
       DPRINTF("ser r: %d bytes '%s'\n", nread, sBuffer);
 
+      if (controlCom == num) {
+        controlClient.write(sBuffer, nread);
+      }
+
       for (int i = 0; i < MAX_CLIENTS_PER_PORT; i++) {
         if (com.clients[i].connected()) {
-          DPRINTF("tcp w[%d]: %d bytes\n", i, bufpos);
+          DPRINTF("tcp w[%d]: %d bytes\n", i, nread);
           com.clients[i].write(sBuffer, nread);
         }
       }
