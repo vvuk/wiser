@@ -322,7 +322,7 @@ void loop()
             controlClient.write(">>> Back to control console\n");
           }
         }
-        DPRINTF("tcp->ser r: %d bytes '%s'\n", nread, sBuffer);
+        DPRINTF("tcp r: %d bytes '%s'\n", nread, sBuffer);
         serial.write(sBuffer, nread);
       }
     };
